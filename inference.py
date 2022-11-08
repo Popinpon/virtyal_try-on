@@ -363,7 +363,7 @@ for model_name in loaded_model_names:
         base_dir="checkpoints"
         # lambda_t=1
         date="01290524"
-        dir=osp.join(base_dir,date)
+        dir=osp.join(base_dir,model_name,date)
         stage="warp"
         filename=f"PFAFN_{stage}_latest.pth"
         warp_paths.append(osp.join(dir,stage,filename))
@@ -374,7 +374,6 @@ for model_name in loaded_model_names:
             gen_paths.append(viton_gen_path)
         else:
             gen_paths.append(osp.join(dir,stage,filename))#viton_gen_path)
-        print(gen_paths)
         output_texts.update({model_name:["ours"]})
     
     if model_name=="vvt_base":
@@ -402,10 +401,12 @@ for model_name in loaded_model_names:
         stage="gen"
         # filename=f"{stage}_model_final.pth"
         filename=f"PFAFN_{stage}_latest.pth"
-        print(warp_paths)
         gen_paths.append(osp.join(dir,stage,filename))
         output_texts.update({model_name:["PF-AFN","(image dataset)"]})
 
+print(warp_paths)
+
+print(gen_paths)
 
 model_dict=load_model(loaded_model_names,warp_paths,gen_paths)
 loaded_model_names.pop(1)
