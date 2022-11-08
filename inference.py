@@ -88,7 +88,7 @@ args=f"--resize_or_crop upper_half --verbose --tf_log --batchSize 5 --num_gpus 2
 
 
 args=args.split()
-opt = TrainOptions().parse(jupyter_args=args)
+opt = TrainOptions().parse()
 
 
 # dataset = CreateDataset(opt)

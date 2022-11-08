@@ -1,23 +1,33 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .correlation import correlation
+import numpy as np
+from options.train_options import TrainOptions
+from .correlation import correlation # the custom cost volume layer
+opt = TrainOptions().parse()
 
 def apply_offset(offset):
-
     sizes = list(offset.size()[2:])
     grid_list = torch.meshgrid([torch.arange(size, device=offset.device) for size in sizes])
     grid_list = reversed(grid_list)
-
+    # apply offset
     grid_list = [grid.float().unsqueeze(0) + offset[:, dim, ...]
         for dim, grid in enumerate(grid_list)]
-
+    # normalize
     grid_list = [grid / ((size - 1.0) / 2.0) - 1.0
         for grid, size in zip(grid_list, reversed(sizes))] 
 
     return torch.stack(grid_list, dim=-1)
 
 
+def TVLoss(x):
+    tv_h = x[:, :, 1:, :] - x[:, :, :-1, :]
+    tv_w = x[:, :, :, 1:] - x[:, :, :, :-1]
+
+    return torch.mean(torch.abs(tv_h)) + torch.mean(torch.abs(tv_w))
+
+
+# backbone 
 class ResBlock(nn.Module):
     def __init__(self, in_channels):
         super(ResBlock, self).__init__()
@@ -50,6 +60,7 @@ class DownSample(nn.Module):
 
 class FeatureEncoder(nn.Module):
     def __init__(self, in_channels, chns=[64,128,256,256,256]):
+        # in_channels = 3 for images, and is larger (e.g., 17+1+1) for agnositc representation
         super(FeatureEncoder, self).__init__()
         self.encoders = []
         for i, out_chns in enumerate(chns):
@@ -79,12 +90,13 @@ class RefinePyramid(nn.Module):
         super(RefinePyramid, self).__init__()
         self.chns = chns
 
+        # adaptive 
         self.adaptive = []
         for in_chns in list(reversed(chns)):
             adaptive_layer = nn.Conv2d(in_chns, fpn_dim, kernel_size=1)
             self.adaptive.append(adaptive_layer)
         self.adaptive = nn.ModuleList(self.adaptive)
-
+        # output conv
         self.smooth = []
         for i in range(len(chns)):
             smooth_layer = nn.Conv2d(fpn_dim, fpn_dim, kernel_size=3, padding=1)
@@ -97,11 +109,12 @@ class RefinePyramid(nn.Module):
         feature_list = []
         last_feature = None
         for i, conv_ftr in enumerate(list(reversed(conv_ftr_list))):
+            # adaptive
             feature = self.adaptive[i](conv_ftr)
-
+            # fuse
             if last_feature is not None:
                 feature = feature + F.interpolate(last_feature, scale_factor=2, mode='nearest')
-
+            # smooth
             feature = self.smooth[i](feature)
             last_feature = feature
             feature_list.append(feature)
@@ -141,45 +154,86 @@ class AFlowNet(nn.Module):
         self.netRefine = nn.ModuleList(self.netRefine)
 
 
-    def forward(self, x, x_warps, x_conds, warp_feature=True):
+    def forward(self, x, x_edge, x_warps, x_conds, warp_feature=True):#image_input, image_edge, image_pyramids, cond_pyramids
         last_flow = None
+        last_flow_all = []
+        delta_list = []
+        x_all = []
+        x_edge_all = []
+        cond_fea_all = []
+        delta_x_all = []
+        delta_y_all = []
+        filter_x = [[0, 0, 0],
+                    [1, -2, 1],
+                    [0, 0, 0]]
+        filter_y = [[0, 1, 0],
+                    [0, -2, 0],
+                    [0, 1, 0]]
+        filter_diag1 = [[1, 0, 0],
+                        [0, -2, 0],
+                        [0, 0, 1]]
+        filter_diag2 = [[0, 0, 1],
+                        [0, -2, 0],
+                        [1, 0, 0]]
+        weight_array = np.ones([3, 3, 1, 4])
+        weight_array[:, :, 0, 0] = filter_x
+        weight_array[:, :, 0, 1] = filter_y
+        weight_array[:, :, 0, 2] = filter_diag1
+        weight_array[:, :, 0, 3] = filter_diag2
+
+        weight_array = torch.cuda.FloatTensor(weight_array).permute(3,2,0,1)
+        self.weight = nn.Parameter(data=weight_array, requires_grad=False)
 
         for i in range(len(x_warps)):
-          x_warp = x_warps[len(x_warps) - 1 - i]
-          x_cond = x_conds[len(x_warps) - 1 - i]
+              x_warp = x_warps[len(x_warps) - 1 - i]
+              x_cond = x_conds[len(x_warps) - 1 - i]
+              cond_fea_all.append(x_cond)
 
-          if last_flow is not None and warp_feature:
-              x_warp_after = F.grid_sample(x_warp, last_flow.detach().permute(0, 2, 3, 1),
-                   mode='bilinear', padding_mode='border')
-          else:
-              x_warp_after = x_warp
+              if last_flow is not None and warp_feature:
+                  x_warp_after = F.grid_sample(x_warp, last_flow.detach().permute(0, 2, 3, 1),
+                       mode='bilinear', padding_mode='border')
+              else:
+                  x_warp_after = x_warp
 
-          tenCorrelation = F.leaky_relu(input=correlation.FunctionCorrelation(tenFirst=x_warp_after, tenSecond=x_cond, intStride=1), negative_slope=0.1, inplace=False)
-          flow = self.netMain[i](tenCorrelation)
-          flow = apply_offset(flow)
+              tenCorrelation = F.leaky_relu(input=correlation.FunctionCorrelation(tenFirst=x_warp_after, tenSecond=x_cond, intStride=1), negative_slope=0.1, inplace=False)
+              flow = self.netMain[i](tenCorrelation)
+              delta_list.append(flow)
+              flow = apply_offset(flow)
+              if last_flow is not None:
+                  flow = F.grid_sample(last_flow, flow, mode='bilinear', padding_mode='border')
+              else:
+                  flow = flow.permute(0, 3, 1, 2)
 
-          if last_flow is not None:
+              last_flow = flow
+              x_warp = F.grid_sample(x_warp, flow.permute(0, 2, 3, 1),mode='bilinear', padding_mode='border')
+              concat = torch.cat([x_warp,x_cond],1)
+              flow = self.netRefine[i](concat)
+              delta_list.append(flow)
+              flow = apply_offset(flow)
               flow = F.grid_sample(last_flow, flow, mode='bilinear', padding_mode='border')
-          else:
-              flow = flow.permute(0, 3, 1, 2)
 
-          last_flow = flow
-          x_warp = F.grid_sample(x_warp, flow.permute(0, 2, 3, 1),mode='bilinear', padding_mode='border')
-          concat = torch.cat([x_warp,x_cond],1)
-          flow = self.netRefine[i](concat)
-          flow = apply_offset(flow)
-          flow = F.grid_sample(last_flow, flow, mode='bilinear', padding_mode='border')
-
-          last_flow = F.interpolate(flow, scale_factor=2, mode='bilinear')
+              last_flow = F.interpolate(flow, scale_factor=2, mode='bilinear')
+              last_flow_all.append(last_flow)
+              cur_x = F.interpolate(x, scale_factor=0.5**(len(x_warps)-1-i), mode='bilinear')
+              cur_x_warp = F.grid_sample(cur_x, last_flow.permute(0, 2, 3, 1),mode='bilinear', padding_mode='border')
+              x_all.append(cur_x_warp)
+              cur_x_edge = F.interpolate(x_edge, scale_factor=0.5**(len(x_warps)-1-i), mode='bilinear')
+              cur_x_warp_edge = F.grid_sample(cur_x_edge, last_flow.permute(0, 2, 3, 1),mode='bilinear', padding_mode='zeros')
+              x_edge_all.append(cur_x_warp_edge)
+              flow_x,flow_y = torch.split(last_flow,1,dim=1)
+              delta_x = F.conv2d(flow_x, self.weight)
+              delta_y = F.conv2d(flow_y,self.weight)
+              delta_x_all.append(delta_x)
+              delta_y_all.append(delta_y)
 
         x_warp = F.grid_sample(x, last_flow.permute(0, 2, 3, 1),
                      mode='bilinear', padding_mode='border')
-        return x_warp, last_flow,
+        return x_warp, last_flow, cond_fea_all, last_flow_all, delta_list, x_all, x_edge_all, delta_x_all, delta_y_all
 
 
 class AFWM(nn.Module):
 
-    def __init__(self,input_nc):# opt, input_nc):
+    def __init__(self, opt, input_nc):
         super(AFWM, self).__init__()
         num_filters = [64,128,256,256,256]
         self.image_features = FeatureEncoder(3, num_filters) 
@@ -187,12 +241,100 @@ class AFWM(nn.Module):
         self.image_FPN = RefinePyramid(num_filters)
         self.cond_FPN = RefinePyramid(num_filters)
         self.aflow_net = AFlowNet(len(num_filters))
+        self.old_lr = opt.lr
+        self.old_lr_warp = opt.lr*0.2
+        
 
-    def forward(self, cond_input, image_input):
+    def forward(self, cond_input, image_input, image_edge):
         cond_pyramids = self.cond_FPN(self.cond_features(cond_input)) # maybe use nn.Sequential
         image_pyramids = self.image_FPN(self.image_features(image_input))
 
-        x_warp, last_flow  = self.aflow_net(image_input, image_pyramids, cond_pyramids)
+        x_warp, last_flow, last_flow_all, flow_all, delta_list, x_all, x_edge_all, delta_x_all, delta_y_all = self.aflow_net(image_input, image_edge, image_pyramids, cond_pyramids)
 
-        return x_warp, last_flow
+        return x_warp, last_flow, last_flow_all, flow_all, delta_list, x_all, x_edge_all, delta_x_all, delta_y_all
+
+
+    def update_learning_rate(self,optimizer):
+        lrd = opt.lr / opt.niter_decay
+        lr = self.old_lr - lrd
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
+        if opt.verbose:
+            print('update learning rate: %f -> %f' % (self.old_lr, lr))
+        self.old_lr = lr
+
+    def update_learning_rate_warp(self,optimizer):
+        lrd = 0.2 * opt.lr / opt.niter_decay
+        lr = self.old_lr_warp - lrd
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
+        if opt.verbose:
+            print('update learning rate: %f -> %f' % (self.old_lr_warp, lr))
+        self.old_lr_warp = lr
+    def encode_input(self,data,mode="video",no_annotation=False):
+
+
+        edge = data['edge']
+        pre_clothes_edge = torch.FloatTensor((edge.detach().numpy() > 0.5).astype(int))
+        clothes = data['color']
+        clothes = clothes * pre_clothes_edge
+        edge_un = data['edge_un']
+        pre_clothes_edge_un = torch.FloatTensor((edge_un.detach().numpy() > 0.5).astype(int))
+        clothes_un = data['color_un']
+        clothes_un = clothes_un * pre_clothes_edge_un
+
+        if mode=='image':
+            real_image=data['image']
+        else :
+            real_image = data['frame']
+
+        if no_annotation:
+            encode_dict={"real_image":real_image, \
+            "cloth":clothes,"cloth_un":clothes_un, \
+            "cloth_mask":pre_clothes_edge,"cloth_mask_un":pre_clothes_edge_un}
+
+            return encode_dict
+
+        person_clothes_edge = torch.FloatTensor((data['label'].cpu().numpy() == 4).astype(int))
+        person_clothes = real_image * person_clothes_edge
+
+        t_mask = torch.FloatTensor((data['label'].cpu().numpy() == 7).astype(float))
+        data['label'] = data['label'] * (1 - t_mask) + t_mask * 4
+
+        pose = data['pose']
+        size = data['label'].size()
+        oneHot_size1 = (size[0], 25, size[2], size[3])
+        densepose = torch.cuda.FloatTensor(torch.Size(oneHot_size1)).zero_()
+        densepose = densepose.scatter_(1, data['densepose'].data.long().cuda(), 1.0)
+        #densepose_fore = data['densepose'] / 24
+        face_mask = torch.FloatTensor((data['label'].cpu().numpy() == 1).astype(int)) + torch.FloatTensor((data['label'].cpu().numpy() == 12).astype(int))
+        other_clothes_mask = torch.FloatTensor((data['label'].cpu().numpy() == 5).astype(int)) + torch.FloatTensor((data['label'].cpu().numpy() == 6).astype(int)) \
+                            + torch.FloatTensor((data['label'].cpu().numpy() == 8).astype(int)) + torch.FloatTensor((data['label'].cpu().numpy() == 9).astype(int)) \
+                            + torch.FloatTensor((data['label'].cpu().numpy() == 10).astype(int))
+        arm_mask = torch.FloatTensor((data['label'].cpu().numpy() == 11).astype(float)) + torch.FloatTensor((data['label'].cpu().numpy() == 13).astype(float))
+
+
+        hand_mask = torch.FloatTensor((data['densepose'].cpu().numpy() == 3).astype(int)) + torch.FloatTensor((data['densepose'].cpu().numpy() == 4).astype(int))
+        dense_preserve_mask = torch.FloatTensor((data['densepose'].cpu().numpy() == 15).astype(int)) + torch.FloatTensor((data['densepose'].cpu().numpy() == 16).astype(int)) \
+                            + torch.FloatTensor((data['densepose'].cpu().numpy() == 17).astype(int)) + torch.FloatTensor((data['densepose'].cpu().numpy() == 18).astype(int)) \
+                            + torch.FloatTensor((data['densepose'].cpu().numpy() == 19).astype(int)) + torch.FloatTensor((data['densepose'].cpu().numpy() == 20).astype(int)) \
+                            + torch.FloatTensor((data['densepose'].cpu().numpy() == 21).astype(int)) + torch.FloatTensor((data['densepose'].cpu().numpy() == 22))
+        hand_img = (arm_mask * hand_mask) * real_image
+        
+        
+        other_clothes_img = other_clothes_mask * real_image
+        face_img = face_mask * real_image
+        preserve_region = face_img + other_clothes_img + hand_img
+        
+        preserve_mask = torch.cat([face_mask, other_clothes_mask], 1)
+        
+        encode_dict={"real_image":real_image,"person_cloth":person_clothes,"person_cloth_edge":person_clothes_edge, \
+            "preserve_mask":preserve_mask,"dense_preserve_mask":dense_preserve_mask,"preserve_region":preserve_region,"pose":pose,"densepose":densepose, \
+            "cloth":clothes,"cloth_un":clothes_un,"cloth_mask":pre_clothes_edge,"cloth_mask_un":pre_clothes_edge_un}
+        # preserve_masks=[preserve_mask,dense_preserve_mask]
+        # poses=[pose,densepose]
+        # clothes_s_t=clothes,clothes_un
+        # edge_s_t=pre_clothes_edge,pre_clothes_edge_un
+
+        return encode_dict
 
