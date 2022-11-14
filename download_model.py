@@ -12,7 +12,7 @@ import zipfile
 try:
     from torch.utils.model_zoo import _download_url_to_file
 except ImportError:
-    from torch.hub import _download_url_to_file
+    from torch.hub import download_url_to_file
 
 
 def unzip(source_filename, dest_dir):
@@ -22,5 +22,5 @@ def unzip(source_filename, dest_dir):
 
 if __name__ == '__main__':
     filename='checkpoints.zip'
-    _download_url_to_file('https://www.dropbox.com/s/y0svnbypzrv4hru/checkpoints.zip?dl=0', filename , None, True)
+    download_url_to_file('https://www.dropbox.com/s/y0svnbypzrv4hru/checkpoints.zip?dl=1',filename)
     unzip(filename, '.')

@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 from options.train_options import TrainOptions
 from .correlation import correlation # the custom cost volume layer
+# from .correlation import correlation_torch as correlation
 opt = TrainOptions().parse()
 
 def apply_offset(offset):
@@ -181,7 +182,7 @@ class AFlowNet(nn.Module):
         weight_array[:, :, 0, 2] = filter_diag1
         weight_array[:, :, 0, 3] = filter_diag2
 
-        weight_array = torch.cuda.FloatTensor(weight_array).permute(3,2,0,1)
+        weight_array = torch.FloatTensor(weight_array).permute(3,2,0,1)
         self.weight = nn.Parameter(data=weight_array, requires_grad=False)
 
         for i in range(len(x_warps)):
@@ -243,7 +244,13 @@ class AFWM(nn.Module):
         self.aflow_net = AFlowNet(len(num_filters))
         self.old_lr = opt.lr
         self.old_lr_warp = opt.lr*0.2
-        
+        if torch.cuda.is_available():
+            device="cuda"
+        elif torch.backends.mps.is_available():
+            device="mps"
+        else: device="cpu"
+
+        self.device=device
 
     def forward(self, cond_input, image_input, image_edge):
         cond_pyramids = self.cond_FPN(self.cond_features(cond_input)) # maybe use nn.Sequential
@@ -304,8 +311,8 @@ class AFWM(nn.Module):
         pose = data['pose']
         size = data['label'].size()
         oneHot_size1 = (size[0], 25, size[2], size[3])
-        densepose = torch.cuda.FloatTensor(torch.Size(oneHot_size1)).zero_()
-        densepose = densepose.scatter_(1, data['densepose'].data.long().cuda(), 1.0)
+        densepose = torch.FloatTensor(torch.Size(oneHot_size1)).zero_()
+        densepose = densepose.scatter_(1, data['densepose'].data.long().to(self.device), 1.0)
         #densepose_fore = data['densepose'] / 24
         face_mask = torch.FloatTensor((data['label'].cpu().numpy() == 1).astype(int)) + torch.FloatTensor((data['label'].cpu().numpy() == 12).astype(int))
         other_clothes_mask = torch.FloatTensor((data['label'].cpu().numpy() == 5).astype(int)) + torch.FloatTensor((data['label'].cpu().numpy() == 6).astype(int)) \

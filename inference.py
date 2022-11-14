@@ -14,13 +14,26 @@ from PIL import Image
 import torch
 import torchvision
 import torch.nn.functional as F
-
-if os.name=='posix':#linux or Mac
+import platform
+pf = platform.system()
+if pf=='Linux':#linux or Mac
     import pyfakewebcam
-if os.name =='nt':#Windows
-    import pyvirtualcam
-import cv2
+    if torch.cuda.is_available():
+        device="cuda"
+    else: device="cpu"
+if pf =="Windows":
 
+    import pyvirtualcam
+    if torch.cuda.is_available():
+        device="cuda"
+    else: device="cpu"
+if pf=="Darwin":
+    import pyvirtualcam
+    if torch.backends.mps.is_available():
+        device="mps"
+    else: device="cpu"
+import cv2
+device="cpu"
 # import models.networks
 # importlib.reload(models.networks)
 from models.networks import ResUnetGenerator
@@ -29,7 +42,7 @@ from models.networks import save_checkpoint, load_checkpoint_part_parallel, load
 # import models.afwm
 # importlib.reload(models.afwm)
 from models.afwm import AFWM 
-import yaml
+# import yaml
 import os.path as osp
 import glob
 
@@ -120,12 +133,12 @@ def load_model(model_types,warp_paths,gen_paths):
 
         PF_gen =  ResUnetGenerator(gen_ch, 4, 5, ngf=64, norm_layer=nn.BatchNorm2d)
 
-        load_checkpoint_parallel(PF_warp,warp_path)
-        load_checkpoint_parallel(PF_gen,gen_path)
+        load_checkpoint_parallel(PF_warp,warp_path,device=device)
+        load_checkpoint_parallel(PF_gen,gen_path,device=device)
         PF_warp.eval()
-        PF_warp.cuda()
+        PF_warp.to(device)
         PF_gen.eval()
-        PF_gen.cuda()
+        PF_gen.to(device)
         p,mb=calc_param(PF_warp)
         p2,mb2=calc_param(PF_gen)
         print(p+p2,'model size: {:.3f}MB'.format(mb+mb2))
@@ -199,7 +212,7 @@ def calc_param(model):
     return param_all,size_all_mb
 def image_forward(model_list,real_image,cloth,edge,prev_list=None):
         warp_model,gen_model=model_list
-        warp_input_l=[real_image.cuda()]
+        warp_input_l=[real_image.to(device)]
         b,c,h,w=cloth.shape
         
         if prev_list is not None:
@@ -207,17 +220,17 @@ def image_forward(model_list,real_image,cloth,edge,prev_list=None):
                 prev_warp_clothes,prev_warp_edges=prev_list
                 prev_warp=prev_warp_clothes.contiguous().view(b,-1,h,w)
                 prev_edge=prev_warp_edges.contiguous().view(b,-1,h,w)
-                prev_l=[prev_warp.cuda(),prev_edge.cuda()]
+                prev_l=[prev_warp.to(device),prev_edge.to(device)]
                 warp_input_l.extend(prev_l)
         # print(real_image.shape,cloth.shape,prev_warp.shape,prev_warp.shape,edge.shape)
         warp_input=torch.cat(warp_input_l,1)
 
-        PF_flow=warp_model(warp_input, cloth.cuda(),edge.cuda())
+        PF_flow=warp_model(warp_input, cloth.to(device),edge.to(device))
         PF_warped_cloth, last_flow, cond_all, flow_all, delta_list, x_all, PF_x_edge_all, delta_x_all, delta_y_all = PF_flow
         PF_warped_prod_edge = PF_x_edge_all[4]
         
         
-        gen_cat=[real_image.cuda(), PF_warped_cloth.cuda(), PF_warped_prod_edge.cuda()]
+        gen_cat=[real_image.to(device), PF_warped_cloth.to(device), PF_warped_prod_edge.to(device)]
         if prev_list is not None and  not is_viton_gen :
 
             gen_cat.extend(prev_l)
@@ -332,8 +345,8 @@ is_whiteback=False
 #output_dir="test/video/0.01vs_baseline/image_video/VITON/"
 #output_dir="test/FID/test"
 
-# init_warped_cloth_PF=torch.zeros(b,1,3,h,w).cuda()#gt_cloth,warped_cloth
-# init_warped_edge_PF=torch.zeros(b,1,1,h,w).cuda()
+# init_warped_cloth_PF=torch.zeros(b,1,3,h,w).to(device)#gt_cloth,warped_cloth
+# init_warped_edge_PF=torch.zeros(b,1,1,h,w).to(device)
 # prev_list=[init_warped_cloth_PF,init_warped_edge_PF]
 #PF_temporal_prev_list=[init_warped_cloth_PF,init_warped_edge_PF]
 import time
@@ -434,8 +447,8 @@ output_dir=f"test/experiment/{loaded_model_names[0]}"
 b,c,h,w=cloth.shape
 b=1
 opt.n_frames_G=2
-init_warped_cloth=torch.zeros(b,opt.n_frames_G-1,3,h,w).cuda()#gt_cloth,warped_cloth
-init_warped_edge=torch.zeros(b,opt.n_frames_G-1,1,h,w).cuda()
+init_warped_cloth=torch.zeros(b,opt.n_frames_G-1,3,h,w).to(device)#gt_cloth,warped_cloth
+init_warped_edge=torch.zeros(b,opt.n_frames_G-1,1,h,w).to(device)
 prev_list=[init_warped_cloth,init_warped_edge]
 
 
@@ -480,13 +493,13 @@ def background_seg(rimage,model_name="DEEPLAB_PLUS"):
     background=background[:,:,0:3]=np.array([241,240,238])*(1-mask)
     seg=(background+seg).astype(np.uint8)
     
-    real_image = transform(seg).unsqueeze(0).cuda()
+    real_image = transform(seg).unsqueeze(0).to(device)
 
     return real_image#,mask
 
 
-cap = cv2.VideoCapture(1)
-if os.name=='nt':
+cap = cv2.VideoCapture(0)
+if os.name=='nt' or pf=="Darwin":
         camera_w,camera_h=int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         cam=pyvirtualcam.Camera(width=camera_w, height=camera_h, fps=30)
   
@@ -495,7 +508,7 @@ segmentation=models.segmentation.deeplabv3_resnet101(pretrained=True, progress=F
 #opt = TestOptions().parse()
 
 segmentation.eval()
-segmentation.cuda()
+segmentation.to(device)
 
 
 
@@ -504,7 +517,7 @@ segnames=["DEEPLAB_PLUS"]
 t=0
 seg_num=0
 clothes_num=0
-is_whiteback=True
+is_whiteback=False
 is_half=True
 is_only_person=True
 text_add=True
@@ -599,13 +612,13 @@ while(1):
         real_image=F.interpolate(real_image, size=[final_h,final_w])
 
         # real_image=cv2.resize(real_image,(final_w,final_h))
-        #real_image = transform(real_image.numpy()).unsqueeze(0).cuda()
+        #real_image = transform(real_image.numpy()).unsqueeze(0).to(device)
 
         ##edge is extracted from the clothes image with the built-in function in python
-        real_image=real_image.cuda()
+        real_image=real_image.to(device)
         # real_image=torch.cat([real_image]*len(cloth),0)
-        input_cloth=input_cloth.cuda()
-        input_edge=input_edge.cuda()
+        input_cloth=input_cloth.to(device)
+        input_edge=input_edge.to(device)
         b,c,h,w=real_image.shape
 
         if is_whiteback:

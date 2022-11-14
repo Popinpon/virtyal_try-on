@@ -13,7 +13,10 @@ linux:[v4l2loopback](https://github.com/umlaeute/v4l2loopback)
 ```
 apt-get install v4l2loopback-utils
 ```
-
+### download model
+```
+googledownload.sh 
+```
 ### Usage
 
 ```sh

@@ -201,13 +201,19 @@ def save_general_checkpoint(model,optimizer,save_path):
         }
     torch.save(checkpoint, save_path)
 
-def load_checkpoint_parallel(model, checkpoint_path,train_flag=False,optimizer=False):
+def load_checkpoint_parallel(model, checkpoint_path,train_flag=False,optimizer=False,device='cuda'):
 
     if not os.path.exists(checkpoint_path):
         print('No checkpoint!')
         return
-    
-    checkpoint = torch.load(checkpoint_path, map_location='cuda:{}'.format(opt.local_rank))
+
+    if device!='cpu':
+        print("#####",device)
+        checkpoint = torch.load(checkpoint_path, map_location='cuda:{}'.format(opt.local_rank))
+
+    else: 
+        checkpoint = torch.load(checkpoint_path,map_location=torch.device('cpu'))
+
     if train_flag:
         checkpoint_model=checkpoint['model_state_dict']
         checkpoint_new = model.state_dict()
