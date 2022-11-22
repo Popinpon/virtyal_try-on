@@ -1,8 +1,8 @@
 # Virtual Try-On Considering Temporal Consistency for Videoconferencing
 This system can be installed on Windows and Linux.
 
-#Installation
-##Install virtual camera
+# Installation
+## Install virtual camera
 
 Windows: [obs](https://obsproject.com/) 
 
