@@ -1,4 +1,4 @@
-# virtyal_try-on
+# Virtual Try-On Considering Temporal Consistency for Videoconferencing
 This system can be installed on Windows and Linux.
 
 #Installation
